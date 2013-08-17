@@ -2,6 +2,8 @@ require File.join(File.dirname(__FILE__), 'windows', 'constants')
 require File.join(File.dirname(__FILE__), 'windows', 'structs')
 require File.join(File.dirname(__FILE__), 'windows', 'functions')
 
+# TODO: ACE ordering http://msdn.microsoft.com/en-us/library/aa379298.aspx
+
 # The Win32 module serves as a namespace only.
 module Win32
 
@@ -28,43 +30,76 @@ module Win32
       # encapsulates an ACL structure, including a binary representation of
       # the ACL itself, and the revision information.
       #
-      def initialize(revision = ACL_REVISION)
-        acl = ACL_STRUCT.new
+      def initialize(acl_struct = nil, opts = {})
+        @revision = opts[:revision] || ACL_REVISION
 
-        unless InitializeAcl(acl, acl.size, revision)
-          raise SystemCallError.new("InitializeAcl", FFI.errno)
+        if acl_struct
+          acl_struct.class == ACL_STRUCT or raise ArgumentError, "Invalid acl_struct"
+        else
+          acl_struct = ACL_STRUCT.new
+
+          unless InitializeAcl(acl_struct, acl_struct.size, @revision)
+            raise SystemCallError.new("InitializeAcl", FFI.errno)
+          end
         end
 
-        @acl = acl
-        @revision = revision
+        @acl = acl_struct
+      end
+
+      # @return [Array<Win32::Security::ACE>]
+      def aces
+        set_aces unless @cached_aces
+        @aces
       end
 
       # Returns the number of ACE's in the ACL object.
       #
       def ace_count
-        info = ACL_SIZE_INFORMATION.new
+        @acl[:AceCount]
+      end
 
-        unless GetAclInformation(@acl, info, info.size, AclSizeInformation)
-          raise SystemCallError.new("GetAclInformation", FFI.errno)
-        end
+      def bytes_in_use
+        set_size_info unless @cached_size_info
+        @bytes_in_use
+      end
 
-        info[:AceCount]
+      def bytes_free
+        set_size_info unless @cached_size_info
+        @bytes_free
       end
 
       # Adds an access allowed ACE to the given +sid+. The +mask+ is a
       # bitwise OR'd value of access rights.
       #
-      # TODO: Move this into the SID class?
       def add_access_allowed_ace(sid, mask=0)
-        unless AddAccessAllowedAce(@acl, @revision, mask, sid)
-          raise SystemCallError.new("AddAccessAllowedAce", FFI.errno)
+        # http://support.microsoft.com/kb/102102
+
+        required_size = bytes_in_use + ACCESS_ALLOWED_ACE.size + GetLengthSid(sid.sid) - FFI.type_size(Windows::Security::Functions.find_type(:dword))
+        pAcl = FFI::MemoryPointer.new required_size
+        InitializeAcl(pAcl, required_size, @revision)
+        newAcl = ACL_STRUCT.new(pAcl)
+        aces.each do |ace|
+          # Ordering rules say non inherited ACEs come first in the ACL
+          if ace.ace_flags & INHERITED_ACE != 0
+            next if ace.sid == sid # this ACE will be replaced by the new ace, so skip
+            AddAce(newAcl.to_ptr, @revision, MAXDWORD, ace.ace.to_ptr, ace.ace_size)
+          end
         end
+        AddAccessAllowedAce(newAcl.to_ptr, @revision, mask, sid.sid)
+        aces.each do |ace|
+          if ace.ace_flags & INHERITED_ACE == 0
+            AddAce(newAcl.to_ptr, @revision, MAXDWORD, ace.ace.to_ptr, ace.ace_size)
+          end
+        end
+        @acl = newAcl
+        invalidate_cached
+        self
       end
 
       # Adds an access denied ACE to the given +sid+.
       #
       def add_access_denied_ace(sid, mask=0)
-        unless AddAccessDeniedAce(@acl, @revision, mask, sid)
+        unless AddAccessDeniedAce(@acl.to_ptr, @revision, mask, sid.sid)
           raise SystemCallError.new("AddAccessDeniedAce", FFI.errno)
         end
       end
@@ -143,6 +178,39 @@ module Win32
       #
       def valid?
         IsValidAcl(@acl)
+      end
+
+      private
+
+      def set_aces
+        # TODO: revision?
+        @aces = []
+        ace_count.times do |n|
+          pAcl = @acl.to_ptr
+          ppAce = FFI::MemoryPointer.new :pointer
+          ret = GetAce(pAcl, n, ppAce)
+          ace_header = ACE_HEADER.new(ppAce.read_pointer)
+          pAce = FFI::MemoryPointer.new ace_header[:AceSize]
+          pAce.write_string(ppAce.read_pointer.read_string(ace_header[:AceSize]), ace_header[:AceSize])
+          @aces << ACE.new(pAce)
+          @cached_aces = true
+        end
+      end
+
+      def set_size_info
+        aclInformation = ACL_SIZE_INFORMATION.new
+        GetAclInformation(@acl.to_ptr, aclInformation.to_ptr, aclInformation.size, AclSizeInformation)
+        @bytes_in_use = aclInformation[:AclBytesInUse]
+        @bytes_free = aclInformation[:AclBytesFree]
+        @cached_size_info = true
+      end
+
+      # Some information is not available directly in the ACL structure and needs to be 
+      # generated with some API calls. These items are lazily fetched, and cached for
+      # future use. If the ACL changes, the caches are invalidated. 
+      def invalidate_cached
+        @cached_aces = nil
+        @cached_size_info = nil
       end
     end
   end
