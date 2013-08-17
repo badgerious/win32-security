@@ -1,4 +1,5 @@
 require 'ffi'
+require File.join(File.dirname(__FILE__), 'constants')
 
 module Windows
   module Security
@@ -36,6 +37,9 @@ module Windows
         )
       end
 
+      # XXX: does this make sense?
+      ACCESS_DENIED_ACE = ACCESS_ALLOWED_ACE.dup
+
       class ACCESS_ALLOWED_ACE2 < FFI::Struct
         layout(
           :Header, ACE_HEADER,
@@ -59,7 +63,41 @@ module Windows
         layout(
           :AceCount, :ulong,
           :AclBytesInUse, :ulong,
-          :AceBytesFree, :ulong
+          :AclBytesFree, :ulong
+        )
+      end
+
+      class LUID < FFI::Struct
+        layout(
+          :LowPart, :ulong,
+          :HighPart, :long,
+        )
+      end
+
+      class LUID_AND_ATTRIBUTES < FFI::Struct
+        layout(
+          :Luid, LUID,
+          :Attributes, :ulong,
+        )
+      end
+
+      class SECURITY_DESCRIPTOR < FFI::Struct
+        layout(
+          :Revision, :uchar,
+          :Sbz1, :uchar,
+          :Control, :ushort,
+          :Owner, :pointer,
+          :Group, :pointer,
+          :Sacl, :pointer,
+          :Dacl, :pointer
+        )
+      end
+
+      class TOKEN_PRIVILEGES < FFI::Struct
+        include Windows::Security::Constants
+        layout(
+          :PrivilegeCount, :ulong,
+          :Privileges, [LUID_AND_ATTRIBUTES, ANYSIZE_ARRAY]
         )
       end
     end
