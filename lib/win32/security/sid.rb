@@ -171,40 +171,11 @@ module Win32
       #
       def initialize(account=nil, host=Socket.gethostname)
         if account.nil?
-          begin
-            ptoken = FFI::MemoryPointer.new(:ulong)
-
-            # Try the thread token first, default to the process token.
-            bool = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, ptoken)
-
-            if !bool && FFI.errno != ERROR_NO_TOKEN
-              raise SystemCallError.new("OpenThreadToken", FFI.errno)
-            else
-              ptoken = FFI::MemoryPointer.new(:ulong)
-              unless OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, ptoken)
-                raise SystemCallError.new("OpenProcessToken", FFI.errno)
-              end
-            end
-
-            token = ptoken.read_ulong
-            pinfo = FFI::MemoryPointer.new(:pointer)
-            plength = FFI::MemoryPointer.new(:ulong)
-
-            # First pass, just get the size needed (1 is TokenOwner)
-            GetTokenInformation(token, 1, pinfo, pinfo.size, plength)
-
-            pinfo = FFI::MemoryPointer.new(plength.read_ulong)
-            plength = FFI::MemoryPointer.new(:ulong)
-
-            # Second pass, actual call (1 is TokenOwner)
-            unless GetTokenInformation(token, 1, pinfo, pinfo.size, plength)
-              raise SystemCallError.new("GetTokenInformation", FFI.errno)
-            end
-
-            token_info = pinfo.read_pointer
-          ensure
-            CloseHandle(token) if token
-          end
+          username = FFI::MemoryPointer.new :char, 256
+          length = FFI::MemoryPointer.new :ulong
+          length.write_ulong(username.size)
+          GetUserName(username, length)
+          account = username.read_string(length.read_ulong).strip
         end
 
         if account
